@@ -1,0 +1,535 @@
+diff --git a/drivers/soc/qcom/Kconfig b/drivers/soc/qcom/Kconfig
+index 2caadbbcf..4b896c34a 100644
+--- a/drivers/soc/qcom/Kconfig
++++ b/drivers/soc/qcom/Kconfig
+@@ -171,6 +171,15 @@ config QCOM_RPMH
+ 	  of hardware components aggregate requests for these resources and
+ 	  help apply the aggregated state on the resource.
+ 
++config QCOM_RPMH_SUCCESS_DEBUG
++	bool "Qualcomm RPMh successful-path TCS diagnostics"
++	depends on QCOM_RPMH
++	help
++	  Select this only for a diagnostic kernel. It records read-only RPMh RSC
++	  active, sleep, and wake TCS register state at system-suspend handoff and
++	  after resume through the rpmh tracepoint. It never triggers or writes a
++	  TCS command and does not send AOSS/QMP messages.
++
+ config QCOM_SMEM
+ 	tristate "Qualcomm Shared Memory Manager (SMEM)"
+ 	depends on ARCH_QCOM || COMPILE_TEST
+diff --git a/drivers/soc/qcom/cmd-db.c b/drivers/soc/qcom/cmd-db.c
+index 84a75d8c4..6c0276ba3 100644
+--- a/drivers/soc/qcom/cmd-db.c
++++ b/drivers/soc/qcom/cmd-db.c
+@@ -267,6 +267,71 @@ enum cmd_db_hw_type cmd_db_read_slave_id(const char *id)
+ }
+ EXPORT_SYMBOL_GPL(cmd_db_read_slave_id);
+ 
++/**
++ * cmd_db_hw_type_str() - Return the name string for an RPMh accelerator address.
++ * @addr: RPMh resource address whose slave ID encodes the accelerator type.
++ *
++ * Extracts the slave ID from bits [19:16] of @addr and maps it to the
++ * corresponding cmd_db_hw_type name.
++ *
++ * Return: A constant string: "ARC", "VRM", "BCM", or "unknown".
++ */
++const char *cmd_db_hw_type_str(u32 addr)
++{
++	switch (SLAVE_ID(addr)) {
++	case CMD_DB_HW_ARC: return "ARC";
++	case CMD_DB_HW_VRM: return "VRM";
++	case CMD_DB_HW_BCM: return "BCM";
++	default:            return "unknown";
++	}
++}
++EXPORT_SYMBOL_GPL(cmd_db_hw_type_str);
++
++/**
++ * cmd_db_read_name() - Look up the resource name for a given RPMh address.
++ * @addr:  RPMh resource address to reverse-look up.
++ * @buf:   Output buffer to write the resource name into.
++ * @len:   Size of @buf; must be at least CMD_DB_ID_SIZE + 1.
++ *
++ * Iterates the command DB to find the entry whose address matches @addr.
++ * For VRM resources, which have up to 4 contiguous 4-byte-aligned addresses
++ * per resource, the match is performed on bits [19:4] so that any of the
++ * sub-addresses resolve to the same resource name.
++ *
++ * Return: 0 on success, -ENODEV if not found or DB not ready.
++ */
++int cmd_db_read_name(u32 addr, char *buf, size_t len)
++{
++	const struct rsc_hdr *rsc_hdr;
++	const struct entry_header *ent;
++	int ret, i, j;
++
++	ret = cmd_db_ready();
++	if (ret)
++		return ret;
++
++	for (i = 0; i < MAX_SLV_ID; i++) {
++		rsc_hdr = &cmd_db_header->header[i];
++		if (!rsc_hdr->slv_id)
++			break;
++
++		ent = rsc_to_entry_header(rsc_hdr);
++		for (j = 0; j < le16_to_cpu(rsc_hdr->cnt); j++, ent++) {
++			u32 ent_addr = le32_to_cpu(ent->addr);
++
++			if (cmd_db_match_resource_addr(ent_addr, addr)) {
++				snprintf(buf, len, "%.*s",
++					 (int)strnlen(ent->id, sizeof(ent->id)),
++					 ent->id);
++				return 0;
++			}
++		}
++	}
++
++	return -ENODEV;
++}
++EXPORT_SYMBOL_GPL(cmd_db_read_name);
++
+ #ifdef CONFIG_DEBUG_FS
+ static int cmd_db_debugfs_dump(struct seq_file *seq, void *p)
+ {
+diff --git a/drivers/soc/qcom/rpmh-internal.h b/drivers/soc/qcom/rpmh-internal.h
+index e3cf1beff..c8a16cb63 100644
+--- a/drivers/soc/qcom/rpmh-internal.h
++++ b/drivers/soc/qcom/rpmh-internal.h
+@@ -123,6 +123,7 @@ struct rsc_drv {
+ 	void __iomem *tcs_base;
+ 	int id;
+ 	int num_tcs;
++	int irq;
+ 	struct notifier_block rsc_pm;
+ 	struct notifier_block genpd_nb;
+ 	atomic_t cpus_in_pm;
+@@ -132,6 +133,7 @@ struct rsc_drv {
+ 	wait_queue_head_t tcs_wait;
+ 	struct rpmh_ctrlr client;
+ 	struct device *dev;
++	struct notifier_block pm_nb;
+ 	struct rsc_ver ver;
+ 	u32 *regs;
+ };
+@@ -141,6 +143,8 @@ int rpmh_rsc_write_ctrl_data(struct rsc_drv *drv,
+ 			     const struct tcs_request *msg);
+ void rpmh_rsc_invalidate(struct rsc_drv *drv);
+ void rpmh_rsc_write_next_wakeup(struct rsc_drv *drv);
++void rpmh_rsc_debug(struct rsc_drv *drv, struct completion *compl);
++void rpmh_rsc_success_snapshot(struct rsc_drv *drv, const char *phase);
+ 
+ void rpmh_tx_done(const struct tcs_request *msg);
+ int rpmh_flush(struct rpmh_ctrlr *ctrlr);
+diff --git a/drivers/soc/qcom/rpmh-rsc.c b/drivers/soc/qcom/rpmh-rsc.c
+index c6f7d5c9c..97a52292f 100644
+--- a/drivers/soc/qcom/rpmh-rsc.c
++++ b/drivers/soc/qcom/rpmh-rsc.c
+@@ -10,6 +10,7 @@
+ #include <linux/cpu_pm.h>
+ #include <linux/delay.h>
+ #include <linux/interrupt.h>
++#include <linux/irq.h>
+ #include <linux/io.h>
+ #include <linux/iopoll.h>
+ #include <linux/kernel.h>
+@@ -25,6 +26,7 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/slab.h>
+ #include <linux/spinlock.h>
++#include <linux/suspend.h>
+ #include <linux/wait.h>
+ 
+ #include <clocksource/arm_arch_timer.h>
+@@ -35,4 +37,23 @@
+ #include "rpmh-internal.h"
+ 
++struct rpmh_rsc_snapshot_data {
++	int tcs_id;
++	int cmd_id;
++	u32 version_major;
++	u32 version_minor;
++	bool tcs_in_use;
++	u32 irq_status;
++	u32 tcs_status;
++	u32 control;
++	u32 cmd_enable;
++	bool command_enabled;
++	u32 msgid;
++	u32 addr;
++	u32 data;
++	u32 cmd_status;
++	u32 resp_data;
++	const char *resource;
++};
++
+ #define CREATE_TRACE_POINTS
+ #include "trace-rpmh.h"
+@@ -89,6 +110,7 @@ enum {
+ #define CMD_MSGID_LEN			8
+ #define CMD_MSGID_RESP_REQ		BIT(8)
+ #define CMD_MSGID_WRITE			BIT(16)
++#define CMD_STATUS_TRIGGERED		BIT(0)
+ #define CMD_STATUS_ISSUED		BIT(8)
+ #define CMD_STATUS_COMPL		BIT(16)
+ 
+@@ -684,7 +706,190 @@ int rpmh_rsc_send_data(struct rsc_drv *drv, const struct tcs_request *msg)
+ 	return 0;
+ }
+ 
++static void print_tcs_info(struct rsc_drv *drv, int tcs_id,
++			   bool *aoss_irq_sts)
++{
++	const struct tcs_request *req = get_req_from_tcs(drv, tcs_id);
++	unsigned long cmds_enabled;
++	char rname[CMD_DB_ID_SIZE + 1] = "unknown";
++	u32 addr, data, msgid, sts, irq_sts;
++	bool in_use = test_bit(tcs_id, drv->tcs_in_use);
++	int i;
++
++	sts = read_tcs_reg(drv, drv->regs[RSC_DRV_STATUS], tcs_id);
++	cmds_enabled = read_tcs_reg(drv, drv->regs[RSC_DRV_CMD_ENABLE], tcs_id);
++	if (!cmds_enabled)
++		return;
++
++	if (!req)
++		goto print_tcs_data;
++
++	data = read_tcs_reg(drv, drv->regs[RSC_DRV_CONTROL], tcs_id);
++	irq_sts = readl_relaxed(drv->tcs_base + drv->regs[RSC_DRV_IRQ_STATUS]);
++	pr_warn("Request: tcs-in-use:%s state=%d wait_for_compl=%u\n",
++		in_use ? "YES" : "NO",
++		req->state, req->wait_for_compl);
++	pr_warn("TCS=%d [ctrlr-sts:%s amc-mode:0x%x irq-sts:%s]\n",
++		tcs_id, sts ? "IDLE" : "BUSY", data,
++		(irq_sts & BIT(tcs_id)) ? "DONE" : "WAITING");
++
++	*aoss_irq_sts = !!(irq_sts & BIT(tcs_id));
++
++print_tcs_data:
++	/* All TCSes on a given SoC have the same number of commands per TCS. */
++	for_each_set_bit(i, &cmds_enabled, drv->tcs[0].ncpt) {
++		addr = read_tcs_cmd(drv, drv->regs[RSC_DRV_CMD_ADDR], tcs_id, i);
++		data = read_tcs_cmd(drv, drv->regs[RSC_DRV_CMD_DATA], tcs_id, i);
++		msgid = read_tcs_cmd(drv, drv->regs[RSC_DRV_CMD_MSGID], tcs_id, i);
++		sts = read_tcs_cmd(drv, drv->regs[RSC_DRV_CMD_STATUS], tcs_id, i);
++		if (cmd_db_read_name(addr, rname, sizeof(rname)))
++			strscpy(rname, "unknown", sizeof(rname));
++		pr_warn("\tCMD=%d [addr=0x%x(%s/%s) data=0x%x %s sts=%s%s%s]\n",
++			i, addr, cmd_db_hw_type_str(addr), rname, data,
++			(msgid & CMD_MSGID_RESP_REQ) ? "resp-required" : "fire-n-forget",
++			(sts & CMD_STATUS_TRIGGERED) ? "triggered" : "-",
++			(sts & CMD_STATUS_ISSUED) ? "+sent-to-aoss" : "",
++			(sts & CMD_STATUS_COMPL) ? "+resp-received" : "");
++	}
++}
++
++/**
++ * rpmh_rsc_debug() - Dump debug information on a transfer timeout.
++ * @drv:   The RSC controller.
++ * @compl: The completion object that timed out.
++ *
++ * Dumps TCS state for all in-use TCSes and reports which accelerators
++ * did not respond, to aid in diagnosing RPMH timeout failures.
++ */
++void rpmh_rsc_debug(struct rsc_drv *drv, struct completion *compl)
++{
++	struct irq_data *rsc_irq_data = irq_get_irq_data(drv->irq);
++	bool gic_irq_sts, aoss_irq_sts = false;
++	int i, busy = 0;
++
++	pr_err("RSC:%s\n", drv->name);
++
++	for (i = 0; i < drv->num_tcs; i++) {
++		if (!test_bit(i, drv->tcs_in_use))
++			continue;
++		busy++;
++		print_tcs_info(drv, i, &aoss_irq_sts);
++	}
++
++	if (!rsc_irq_data) {
++		pr_err("No IRQ data for RSC:%s\n", drv->name);
++		return;
++	}
++
++	irq_get_irqchip_state(drv->irq, IRQCHIP_STATE_PENDING, &gic_irq_sts);
++	pr_warn("HW IRQ %lu is %s at GIC\n", rsc_irq_data->hwirq,
++		gic_irq_sts ? "PENDING" : "NOT PENDING");
++	pr_warn("Completion is %s\n",
++		completion_done(compl) ? "done" : "not done");
++
++	if ((busy && !gic_irq_sts) || !aoss_irq_sts)
++		pr_err("ERROR: Accelerator(s) at AOSS did not respond\n");
++	else if (gic_irq_sts)
++		pr_err("ERROR: IRQ pending at GIC but not handled within timeout\n");
++}
++
++#if IS_ENABLED(CONFIG_QCOM_RPMH_SUCCESS_DEBUG)
++static void rpmh_rsc_snapshot_tcs(struct rsc_drv *drv, const char *phase,
++					  const char *group, int tcs_id)
++{
++	unsigned long cmd_enable;
++	u32 irq_status, tcs_status, control;
++	bool command_seen = false;
++	int cmd_id;
++
++	irq_status = readl_relaxed(drv->tcs_base +
++					   drv->regs[RSC_DRV_IRQ_STATUS]);
++	tcs_status = read_tcs_reg(drv, drv->regs[RSC_DRV_STATUS], tcs_id);
++	control = read_tcs_reg(drv, drv->regs[RSC_DRV_CONTROL], tcs_id);
++	cmd_enable = read_tcs_reg(drv, drv->regs[RSC_DRV_CMD_ENABLE], tcs_id);
++
++	for_each_set_bit(cmd_id, &cmd_enable, MAX_CMDS_PER_TCS) {
++		char resource[CMD_DB_ID_SIZE + 1] = "unknown";
++		u32 msgid, addr, data, cmd_status, resp_data;
++		struct rpmh_rsc_snapshot_data snapshot;
++
++		msgid = read_tcs_cmd(drv, drv->regs[RSC_DRV_CMD_MSGID],
++					     tcs_id, cmd_id);
++		addr = read_tcs_cmd(drv, drv->regs[RSC_DRV_CMD_ADDR],
++					    tcs_id, cmd_id);
++		data = read_tcs_cmd(drv, drv->regs[RSC_DRV_CMD_DATA],
++					    tcs_id, cmd_id);
++		cmd_status = read_tcs_cmd(drv, drv->regs[RSC_DRV_CMD_STATUS],
++						   tcs_id, cmd_id);
++		resp_data = read_tcs_cmd(drv, drv->regs[RSC_DRV_CMD_RESP_DATA],
++						  tcs_id, cmd_id);
++		if (cmd_db_read_name(addr, resource, sizeof(resource)))
++			strscpy(resource, "unknown", sizeof(resource));
++
++		snapshot = (struct rpmh_rsc_snapshot_data) {
++			.tcs_id = tcs_id,
++			.cmd_id = cmd_id,
++			.version_major = drv->ver.major,
++			.version_minor = drv->ver.minor,
++			.tcs_in_use = test_bit(tcs_id, drv->tcs_in_use),
++			.irq_status = irq_status,
++			.tcs_status = tcs_status,
++			.control = control,
++			.cmd_enable = (u32)cmd_enable,
++			.command_enabled = true,
++			.msgid = msgid,
++			.addr = addr,
++			.data = data,
++			.cmd_status = cmd_status,
++			.resp_data = resp_data,
++			.resource = resource,
++		};
++		trace_rpmh_rsc_snapshot(drv, phase, group, &snapshot);
++		command_seen = true;
++	}
++
++	if (!command_seen) {
++		struct rpmh_rsc_snapshot_data snapshot = {
++			.tcs_id = tcs_id,
++			.cmd_id = -1,
++			.version_major = drv->ver.major,
++			.version_minor = drv->ver.minor,
++			.tcs_in_use = test_bit(tcs_id, drv->tcs_in_use),
++			.irq_status = irq_status,
++			.tcs_status = tcs_status,
++			.control = control,
++			.cmd_enable = (u32)cmd_enable,
++			.command_enabled = false,
++			.resource = "",
++		};
++
++		trace_rpmh_rsc_snapshot(drv, phase, group, &snapshot);
++	}
++}
++
++void rpmh_rsc_success_snapshot(struct rsc_drv *drv, const char *phase)
++{
++	static const int types[] = { ACTIVE_TCS, SLEEP_TCS, WAKE_TCS };
++	static const char * const groups[] = { "active", "sleep", "wake" };
++	int i, tcs_id;
++
++	for (i = 0; i < ARRAY_SIZE(types); i++) {
++		const struct tcs_group *tcs = &drv->tcs[types[i]];
++
++		for (tcs_id = tcs->offset;
++		     tcs_id < tcs->offset + tcs->num_tcs; tcs_id++)
++			rpmh_rsc_snapshot_tcs(drv, phase, groups[i], tcs_id);
++	}
++}
++#else
++void rpmh_rsc_success_snapshot(struct rsc_drv *drv, const char *phase)
++{
++	(void)drv;
++	(void)phase;
++}
++#endif
++
+ /**
+  * find_slots() - Find a place to write the given message.
+  * @tcs:    The tcs group to search.
+  * @msg:    The message we want to find room for.
+@@ -1092,6 +1297,8 @@ static int rpmh_rsc_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
++	drv->irq = irq;
++
+ 	/*
+ 	 * CPU PM/genpd notification are not required for controllers that support
+ 	 * 'HW solver' mode where they can be in autonomous mode executing low
+diff --git a/drivers/soc/qcom/rpmh.c b/drivers/soc/qcom/rpmh.c
+index ca37da3dc..4c378dd22 100644
+--- a/drivers/soc/qcom/rpmh.c
++++ b/drivers/soc/qcom/rpmh.c
+@@ -15,6 +15,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
+ #include <linux/spinlock.h>
++#include <linux/suspend.h>
+ #include <linux/types.h>
+ #include <linux/wait.h>
+ 
+@@ -255,6 +256,7 @@ int rpmh_write(const struct device *dev, enum rpmh_state state,
+ {
+ 	DECLARE_COMPLETION_ONSTACK(compl);
+ 	DEFINE_RPMH_MSG_ONSTACK(dev, state, &compl, rpm_msg);
++	struct rpmh_ctrlr *ctrlr = get_rpmh_ctrlr(dev);
+ 	int ret;
+ 
+ 	ret = __fill_rpmh_msg(&rpm_msg, state, cmd, n);
+@@ -266,6 +268,8 @@ int rpmh_write(const struct device *dev, enum rpmh_state state,
+ 		return ret;
+ 
+ 	ret = wait_for_completion_timeout(&compl, RPMH_TIMEOUT_MS);
++	if (!ret)
++		rpmh_rsc_debug(ctrlr_to_drv(ctrlr), &compl);
+ 	WARN_ON(!ret);
+ 	return (ret > 0) ? 0 : -ETIMEDOUT;
+ }
+@@ -383,6 +387,7 @@ int rpmh_write_batch(const struct device *dev, enum rpmh_state state,
+ 			 * the completion that we're going to free once
+ 			 * we've returned from this function.
+ 			 */
++			rpmh_rsc_debug(ctrlr_to_drv(ctrlr), &compls[i]);
+ 			WARN_ON(1);
+ 			ret = -ETIMEDOUT;
+ 			goto exit;
+@@ -474,6 +479,10 @@ int rpmh_flush(struct rpmh_ctrlr *ctrlr)
+ 
+ write_next_wakeup:
+ 	rpmh_rsc_write_next_wakeup(ctrlr_to_drv(ctrlr));
++#if IS_ENABLED(CONFIG_QCOM_RPMH_SUCCESS_DEBUG)
++	if (system_state == SYSTEM_SUSPEND)
++		rpmh_rsc_success_snapshot(ctrlr_to_drv(ctrlr), "pre-suspend");
++#endif
+ exit:
+ 	spin_unlock(&ctrlr->cache_lock);
+ 	return ret;
+diff --git a/drivers/soc/qcom/trace-rpmh.h b/drivers/soc/qcom/trace-rpmh.h
+index 593ec1d4e..17f4901e5 100644
+--- a/drivers/soc/qcom/trace-rpmh.h
++++ b/drivers/soc/qcom/trace-rpmh.h
+@@ -76,6 +76,71 @@ TRACE_EVENT(rpmh_send_msg,
+ 		  __entry->addr, __entry->data, __entry->wait)
+ );
+ 
++TRACE_EVENT(rpmh_rsc_snapshot,
++
++	TP_PROTO(struct rsc_drv *d, const char *phase, const char *group,
++		 const struct rpmh_rsc_snapshot_data *snapshot),
++
++	TP_ARGS(d, phase, group, snapshot),
++
++	TP_STRUCT__entry(
++			 __string(name, d->name)
++			 __string(phase, phase)
++			 __string(group, group)
++			 __string(resource, snapshot->resource)
++			 __field(int, tcs_id)
++			 __field(int, cmd_id)
++			 __field(u32, version_major)
++			 __field(u32, version_minor)
++			 __field(bool, tcs_in_use)
++			 __field(u32, irq_status)
++			 __field(u32, tcs_status)
++			 __field(u32, control)
++			 __field(u32, cmd_enable)
++			 __field(bool, command_enabled)
++			 __field(u32, msgid)
++			 __field(u32, addr)
++			 __field(u32, data)
++			 __field(u32, cmd_status)
++			 __field(u32, resp_data)
++	),
++
++	TP_fast_assign(
++		       __assign_str(name);
++		       __assign_str(phase);
++		       __assign_str(group);
++		       __assign_str(resource);
++		       __entry->tcs_id = snapshot->tcs_id;
++		       __entry->cmd_id = snapshot->cmd_id;
++		       __entry->version_major = snapshot->version_major;
++		       __entry->version_minor = snapshot->version_minor;
++		       __entry->tcs_in_use = snapshot->tcs_in_use;
++		       __entry->irq_status = snapshot->irq_status;
++		       __entry->tcs_status = snapshot->tcs_status;
++		       __entry->control = snapshot->control;
++		       __entry->cmd_enable = snapshot->cmd_enable;
++		       __entry->command_enabled = snapshot->command_enabled;
++		       __entry->msgid = snapshot->msgid;
++		       __entry->addr = snapshot->addr;
++		       __entry->data = snapshot->data;
++		       __entry->cmd_status = snapshot->cmd_status;
++		       __entry->resp_data = snapshot->resp_data;
++	),
++
++	TP_printk("%s: phase=%s group=%s tcs=%d cmd=%d version=%u.%u "
++		  "tcs_in_use=%d irq_status=%#x tcs_status=%#x control=%#x "
++		  "cmd_enable=%#x command_enabled=%d msgid=%#x addr=%#x "
++		  "resource=%s data=%#x cmd_status=%#x resp_data=%#x",
++		  __get_str(name), __get_str(phase), __get_str(group),
++		  __entry->tcs_id, __entry->cmd_id, __entry->version_major,
++		  __entry->version_minor, __entry->tcs_in_use,
++		  __entry->irq_status, __entry->tcs_status, __entry->control,
++		  __entry->cmd_enable, __entry->command_enabled,
++		  __entry->msgid, __entry->addr, __get_str(resource),
++		  __entry->data, __entry->cmd_status, __entry->resp_data)
++);
++
++
+ #endif /* _TRACE_RPMH_H */
+ 
+ #undef TRACE_INCLUDE_PATH
+diff --git a/include/soc/qcom/cmd-db.h b/include/soc/qcom/cmd-db.h
+index 47a6cab75..2b2e43318 100644
+--- a/include/soc/qcom/cmd-db.h
++++ b/include/soc/qcom/cmd-db.h
+@@ -19,6 +19,8 @@ enum cmd_db_hw_type {
+ 	CMD_DB_HW_ALL     = 0xff,
+ };
+ 
++#define CMD_DB_ID_SIZE		8
++
+ #if IS_ENABLED(CONFIG_QCOM_COMMAND_DB)
+ u32 cmd_db_read_addr(const char *resource_id);
+ 
+@@ -29,6 +31,8 @@ bool cmd_db_match_resource_addr(u32 addr1, u32 addr2);
+ enum cmd_db_hw_type cmd_db_read_slave_id(const char *resource_id);
+ 
+ int cmd_db_ready(void);
++const char *cmd_db_hw_type_str(u32 addr);
++int cmd_db_read_name(u32 addr, char *buf, size_t len);
+ #else
+ static inline u32 cmd_db_read_addr(const char *resource_id)
+ { return 0; }
+@@ -44,5 +48,11 @@ static inline enum cmd_db_hw_type cmd_db_read_slave_id(const char *resource_id)
+ 
+ static inline int cmd_db_ready(void)
+ { return -ENODEV; }
++
++static inline const char *cmd_db_hw_type_str(u32 addr)
++{ return "unknown"; }
++
++static inline int cmd_db_read_name(u32 addr, char *buf, size_t len)
++{ return -ENODEV; }
+ #endif /* CONFIG_QCOM_COMMAND_DB */
+ #endif /* __QCOM_COMMAND_DB_H__ */

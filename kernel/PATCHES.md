@@ -6,6 +6,11 @@ commit, or `armada` for original work; a URL source with no `notes` is verbatim.
 A patch entry's `upstream` is `local` for an Armada-authored change, `unknown` when
 no equivalent submission was found, or a permanent URL to the upstream submission.
 
+- `patches/0900-soc-qcom-rpmh-read-only-diagnostics.patch`
+  source: https://github.com/qualcomm-linux/kernel/commit/946390ea27648ac0e76ecd1950405f1ce3ed5640, https://github.com/qualcomm-linux/kernel/commit/b98e95ae006480d4d6c384725beede55ed3092d7, https://github.com/qualcomm-linux/kernel/commit/403d2a6ac9213a7454fa31744f8ad6089d368cd8
+  upstream: https://github.com/qualcomm-linux/kernel/pull/907
+  notes: Combines the reviewed Qualcomm CMD-DB reverse-lookup and RPMh-RSC timeout diagnostics with an Armada observation-only successful-path tracepoint. The Armada portion reads the configured active/sleep/wake TCS register windows after the system-suspend sleep set is programmed and on PM_POST_SUSPEND; it uses the driver's version-selected offsets and never writes TCS/AOSS/QMP state. This patch is intentionally enabled only in the isolated suspend-lab package clone via CONFIG_QCOM_RPMH_SUCCESS_DEBUG=y.
+
 - `patches/0002-qcom-dispcc-sm8550-Fix-disp_cc_mdss_mdp_clk_src.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/patches/linux/0002-qcom-dispcc-sm8550-Fix-disp_cc_mdss_mdp_clk_src.patch
   upstream: unknown

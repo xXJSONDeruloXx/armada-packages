@@ -175,7 +175,7 @@ index c6f7d5c9c..97a52292f 100644
  #define CMD_STATUS_ISSUED		BIT(8)
  #define CMD_STATUS_COMPL		BIT(16)
  
-@@ -684,7 +706,190 @@ int rpmh_rsc_send_data(struct rsc_drv *drv, const struct tcs_request *msg)
+@@ -684,7 +706,201 @@ int rpmh_rsc_send_data(struct rsc_drv *drv, const struct tcs_request *msg)
  	return 0;
  }
  
@@ -354,6 +354,17 @@ index c6f7d5c9c..97a52292f 100644
 +			rpmh_rsc_snapshot_tcs(drv, phase, groups[i], tcs_id);
 +	}
 +}
++static int rpmh_rsc_success_pm_callback(struct notifier_block *nb,
++						 unsigned long action, void *v)
++{
++	struct rsc_drv *drv = container_of(nb, struct rsc_drv, pm_nb);
++
++	(void)v;
++	if (action == PM_POST_SUSPEND)
++		rpmh_rsc_success_snapshot(drv, "post-resume");
++
++	return NOTIFY_OK;
++}
 +#else
 +void rpmh_rsc_success_snapshot(struct rsc_drv *drv, const char *phase)
 +{
@@ -366,11 +377,18 @@ index c6f7d5c9c..97a52292f 100644
   * find_slots() - Find a place to write the given message.
   * @tcs:    The tcs group to search.
   * @msg:    The message we want to find room for.
-@@ -1092,6 +1297,8 @@ static int rpmh_rsc_probe(struct platform_device *pdev)
+@@ -1092,6 +1308,15 @@ static int rpmh_rsc_probe(struct platform_device *pdev)
  	if (ret)
  		return ret;
  
 +	drv->irq = irq;
++
++#if IS_ENABLED(CONFIG_QCOM_RPMH_SUCCESS_DEBUG)
++	drv->pm_nb.notifier_call = rpmh_rsc_success_pm_callback;
++	ret = register_pm_notifier(&drv->pm_nb);
++	if (ret)
++		return ret;
++#endif
 +
  	/*
  	 * CPU PM/genpd notification are not required for controllers that support

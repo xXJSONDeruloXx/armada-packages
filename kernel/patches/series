@@ -166,3 +166,4 @@ v2_20260420_neil_armstrong_arm64_qcom_sm8650_misc_enhancements.patch
 0612-ROCKNIX-odin3-q6apm-start-mi2s-port-at-prepare.patch
 0613-ASoC-q6apm-scope-prepare-start-to-MI2S.patch
 0900-soc-qcom-rpmh-read-only-diagnostics.patch
+0910-usb-dwc3-qcom-skip-phy-init.patch

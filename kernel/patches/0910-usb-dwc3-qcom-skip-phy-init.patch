@@ -1,0 +1,64 @@
+From 20260720-dwc3-skip-init-quirk Mon Sep 17 00:00:00 2001
+From: Krishna Kurapati <krishna.kurapati@xxxxxxxxxxxxxxxx>
+Date: Thu, 23 Jul 2026 06:56:43 -0400
+Subject: [PATCH] usb: dwc3: qcom: Add support to skip phy management by USB core
+
+The Qualcomm DWC3 glue driver manages its PHYs itself.  If the USB core also
+initializes the PHY, the extra init reference can keep the PHY's init count
+nonzero during system suspend and prevent the Qualcomm glue driver's exit
+operation from powering it down.
+
+This is the reviewed upstream proposal from change-id
+20260720-dwc3-skip-init-quirk-c110eae068ac, ported without changing its
+behavior to Armada's Linux 7.2 package.  The xHCI platform driver already
+supports the `xhci-skip-phy-init-quirk` software property in this base.
+
+Link: https://lkml.iu.edu/2607.2/15543.html
+Signed-off-by: Krishna Kurapati <krishna.kurapati@xxxxxxxxxxxxxxxx>
+---
+ drivers/usb/dwc3/dwc3-qcom.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/drivers/usb/dwc3/dwc3-qcom.c b/drivers/usb/dwc3/dwc3-qcom.c
+index ac68b4218b56..ba26e61df915 100644
+--- a/drivers/usb/dwc3/dwc3-qcom.c
++++ b/drivers/usb/dwc3/dwc3-qcom.c
+@@ -19,6 +19,7 @@
+ #include <linux/usb/hcd.h>
+ #include <linux/usb.h>
++#include <linux/property.h>
+ #include "core.h"
+ #include "glue.h"
+ 
+ /* USB QSCRATCH Hardware registers */
+@@ -419,6 +420,16 @@ static irqreturn_t qcom_dwc3_resume_irq(int irq, void *data)
+ 	return IRQ_HANDLED;
+ }
+ 
++static int dwc3_qcom_set_swnode(struct device *dev)
++{
++	const struct property_entry props[] = {
++		PROPERTY_ENTRY_BOOL("xhci-skip-phy-init-quirk"),
++		{}
++	};
++
++	return device_create_managed_software_node(dev, props, NULL);
++}
++
+ static void dwc3_qcom_select_utmi_clk(struct dwc3_qcom *qcom)
+ {
+ 	/* Configure dwc3 to use UTMI clock as PIPE clock not present */
+@@ -683,7 +694,11 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
+ 	if (ignore_pipe_clk)
+ 		dwc3_qcom_select_utmi_clk(qcom);
+ 
++	ret = dwc3_qcom_set_swnode(dev);
++	if (ret)
++		goto clk_disable;
++
+ 	qcom->mode = usb_get_dr_mode(dev);
+ 
+ 	if (qcom->mode == USB_DR_MODE_HOST) {
+ 		qcom->current_role = USB_ROLE_HOST;
+-- 
+2.45.2

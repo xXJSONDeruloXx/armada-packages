@@ -88,9 +88,16 @@
 v9_20260729_qualcomm_crypto_qce_runtime_pm_interconnect.patch
 0504-mailbox-qcom-ipcc-mask-summary-irq-for-suspend-to-ram.patch
 0505-msm_gem-lock-before-put_iova_spaces.patch
+0203-thermal-qcom-tsens-skip-sm8550-uplow-wake-irq.patch
 0204-thermal-qcom-tsens-mask-lower-threshold-irqs-across-suspend.patch
 0510-soc-qcom-ice-unwind-clocks-on-resume-failure.patch
 0511-scsi-ufs-qcom-reenable-irq-on-host-reset-failure.patch
+1007-scsi-ufs-qcom-propagate-hibern8-exit-failure-clk-scale.patch
+1008-scsi-ufs-qcom-auto-hibern8-clk-gating-collision.patch
+1009-scsi-ufs-recover-hibern8-enter-clk-gating.patch
+1010-scsi-ufs-qcom-keep-mphy-powered-on-hibern8-park.patch
+1011-scsi-ufs-hold-clk-gating-across-system-pm.patch
+1015-ufs-qcom-disable-rx-linecfg-after-link-startup.patch
 0512-PCI-qcom-skip-L23-ready-poll-on-SM8550.patch
 0513-PCI-qcom-honour-an-opp-suspend-opp-as-the-non-s2ram-memory-floor.patch
 

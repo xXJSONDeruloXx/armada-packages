@@ -257,6 +257,30 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `patches/0511-scsi-ufs-qcom-reenable-irq-on-host-reset-failure.patch`
   source: armada
   upstream: local
+- `patches/0203-thermal-qcom-tsens-skip-sm8550-uplow-wake-irq.patch`
+  source: https://github.com/xiaodoudou/distribution/blob/38ae9525deb3954ecccb06d4ad08a3608f0898e6/projects/ROCKNIX/devices/SM8550/patches/linux/0203-thermal-qcom-tsens-skip-sm8550-uplow-wake-irq.patch
+  upstream: unknown
+  notes: Deep-suspend test branch only. Keeps the SM8550 TSENS uplow/passive threshold IRQ from being armed as a wake IRQ; Armada's existing 0204 still masks the lower threshold across the transition.
+- `patches/1007-scsi-ufs-qcom-propagate-hibern8-exit-failure-clk-scale.patch`
+  source: https://github.com/xiaodoudou/distribution/blob/38ae9525deb3954ecccb06d4ad08a3608f0898e6/projects/ROCKNIX/devices/SM8550/patches/linux/1007-scsi-ufs-qcom-propagate-hibern8-exit-failure-clk-scale.patch
+  upstream: unknown
+- `patches/1008-scsi-ufs-qcom-auto-hibern8-clk-gating-collision.patch`
+  source: https://github.com/xiaodoudou/distribution/blob/38ae9525deb3954ecccb06d4ad08a3608f0898e6/projects/ROCKNIX/devices/SM8550/patches/linux/1008-scsi-ufs-qcom-auto-hibern8-clk-gating-collision.patch
+  upstream: unknown
+- `patches/1009-scsi-ufs-recover-hibern8-enter-clk-gating.patch`
+  source: https://github.com/xiaodoudou/distribution/blob/38ae9525deb3954ecccb06d4ad08a3608f0898e6/projects/ROCKNIX/devices/SM8550/patches/linux/1009-scsi-ufs-recover-hibern8-enter-clk-gating.patch
+  upstream: unknown
+  notes: Safety-net recovery for clock-gating Hibern8-enter failures; paired with 1011 in the hardware-tested deep-suspend stack.
+- `patches/1010-scsi-ufs-qcom-keep-mphy-powered-on-hibern8-park.patch`
+  source: https://github.com/xiaodoudou/distribution/blob/38ae9525deb3954ecccb06d4ad08a3608f0898e6/projects/ROCKNIX/devices/SM8550/patches/linux/1010-scsi-ufs-qcom-keep-mphy-powered-on-hibern8-park.patch
+  upstream: unknown
+- `patches/1011-scsi-ufs-hold-clk-gating-across-system-pm.patch`
+  source: https://github.com/xiaodoudou/distribution/blob/38ae9525deb3954ecccb06d4ad08a3608f0898e6/projects/ROCKNIX/devices/SM8550/patches/linux/1011-scsi-ufs-hold-clk-gating-across-system-pm.patch
+  upstream: unknown
+  notes: Prevents the asynchronous idle clock-gating worker from racing system PM; hardware reports pair this with 1009.
+- `patches/1015-ufs-qcom-disable-rx-linecfg-after-link-startup.patch`
+  source: https://github.com/xiaodoudou/distribution/blob/38ae9525deb3954ecccb06d4ad08a3608f0898e6/projects/ROCKNIX/devices/SM8550/patches/linux/1015-ufs-qcom-disable-rx-linecfg-after-link-startup.patch
+  upstream: unknown
 - `patches/0512-PCI-qcom-skip-L23-ready-poll-on-SM8550.patch`
   source: armada
   upstream: local

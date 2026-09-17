@@ -4,7 +4,7 @@
 Name:           armada-steam-charging-eta
 Version:        1
 Release:        1%{?dist}.armada
-Summary:        Show charging time in Steam Game Mode
+Summary:        Publish UPower battery estimates to Steam vpower
 License:        GPL-3.0-or-later
 URL:            https://github.com/armada-os/armada-packages
 Source0:        armada-steam-charging-eta
@@ -14,11 +14,10 @@ BuildArch:      noarch
 BuildRequires:  systemd-rpm-macros
 
 Requires:       python3
-Requires:       python3-websocket-client
 Requires:       systemd
 
 %description
-Uses UPower's charging estimate to update Steam Game Mode's battery time.
+Publishes UPower battery estimates through Steam's vpower file interface.
 
 %prep
 

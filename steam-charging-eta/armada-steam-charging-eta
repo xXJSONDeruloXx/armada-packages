@@ -1,0 +1,90 @@
+#!/usr/bin/python3
+import json
+import logging
+import subprocess
+import time
+import urllib.request
+import websocket
+
+LOG = logging.getLogger("armada-steam-charging-eta")
+DEVICE = "/org/freedesktop/UPower/devices/DisplayDevice"
+IFACE = "org.freedesktop.UPower.Device"
+SERVICE = "org.freedesktop.UPower"
+
+
+def upower(name):
+    out = subprocess.check_output(
+        ["busctl", "--system", "get-property", SERVICE, DEVICE, IFACE, name],
+        text=True,
+        timeout=2,
+    )
+    return int(out.split()[-1])
+
+
+def connect():
+    with urllib.request.urlopen("http://127.0.0.1:8080/json/list", timeout=2) as r:
+        targets = json.load(r)
+    target = next(t for t in targets if t.get("title") == "SharedJSContext")
+    return websocket.create_connection(
+        target["webSocketDebuggerUrl"], timeout=3, suppress_origin=True
+    )
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    ws, request_id, last_eta, last_state, last_error = None, 0, None, None, None
+    while True:
+        try:
+            state = upower("State")
+            if state == 1:  # UPower State::charging
+                seconds = upower("TimeToFull")
+                seconds = seconds if seconds > 0 else -1
+                if ws is None:
+                    ws = connect()
+                request_id += 1
+                expression = (
+                    "(() => { if (typeof SystemPowerStore === 'undefined') "
+                    "throw new Error('Steam battery store unavailable'); "
+                    f"SystemPowerStore.m_nBatterySecondsRemaining = {seconds}; "
+                    "return SystemPowerStore.m_nBatterySecondsRemaining; })()"
+                )
+                ws.send(json.dumps({
+                    "id": request_id,
+                    "method": "Runtime.evaluate",
+                    "params": {"expression": expression, "returnByValue": True},
+                }))
+                while True:
+                    reply = json.loads(ws.recv())
+                    if reply.get("id") == request_id:
+                        if "error" in reply or "exceptionDetails" in reply.get("result", {}):
+                            raise RuntimeError("Steam rejected battery ETA update")
+                        value = reply.get("result", {}).get("result", {}).get("value")
+                        if value != seconds:
+                            raise RuntimeError(f"Steam stored {value!r}, expected {seconds}")
+                        break
+                if seconds > 0 and seconds != last_eta and (last_eta is None or abs(seconds - last_eta) >= 60):
+                    LOG.info("Steam charging ETA: %d min", seconds // 60)
+                    last_eta = seconds
+                if last_state != state:
+                    LOG.info("Charging; using UPower TimeToFull")
+                last_state = state
+            else:
+                if ws is not None:
+                    ws.close()
+                    ws = None
+                if state != last_state:
+                    LOG.info("UPower state %d; leaving Steam estimate alone", state)
+                last_state, last_eta = state, None
+            last_error = None
+        except Exception as e:
+            if ws is not None:
+                ws.close()
+                ws = None
+            if str(e) != last_error:
+                LOG.warning("ETA update unavailable: %s", e)
+                last_error = str(e)
+        time.sleep(1)
+
+
+if __name__ == "__main__":
+    main()
